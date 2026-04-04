@@ -1,4 +1,5 @@
 ﻿using FortniteReplayReader.Models;
+using FortniteReplayReader.Models.Events;
 using FortniteReplayReader.Models.NetFieldExports;
 using FortniteReplayReader.Models.NetFieldExports.Weapons;
 using System.Collections.Generic;
@@ -59,12 +60,101 @@ public class FortniteReplayBuilder
     public FortniteReplay Build(FortniteReplay replay)
     {
         UpdateTeamData();
+        EnsurePlayersFromEliminations(replay);
+        PopulateKillFeedFromEliminations(replay);
         replay.GameData = GameData;
         replay.MapData = MapData;
         replay.KillFeed = KillFeed;
         replay.TeamData = _teams.Values;
         replay.PlayerData = _players.Values;
         return replay;
+    }
+
+    private void EnsurePlayersFromEliminations(FortniteReplay replay)
+    {
+        if (replay.Eliminations.Count == 0)
+        {
+            return;
+        }
+
+        var nextSyntheticId = _players.Values
+            .Select(player => player.Id ?? 0)
+            .DefaultIfEmpty(0)
+            .Max() + 1;
+
+        foreach (var elimination in replay.Eliminations)
+        {
+            EnsurePlayerFromEvent(elimination.EliminatedInfo, ref nextSyntheticId);
+            EnsurePlayerFromEvent(elimination.EliminatorInfo, ref nextSyntheticId);
+        }
+    }
+
+    private void EnsurePlayerFromEvent(PlayerEliminationInfo playerInfo, ref int nextSyntheticId)
+    {
+        if (string.IsNullOrWhiteSpace(playerInfo?.Id) || TryGetPlayerDataFromEventId(playerInfo.Id) != null)
+        {
+            return;
+        }
+
+        var syntheticPlayer = new PlayerData
+        {
+            Id = nextSyntheticId++,
+            IsBot = playerInfo.IsBot
+        };
+
+        if (playerInfo.IsBot)
+        {
+            syntheticPlayer.BotId = playerInfo.Id;
+            syntheticPlayer.PlayerName = playerInfo.Id;
+        }
+        else
+        {
+            syntheticPlayer.EpicId = playerInfo.Id;
+            syntheticPlayer.PlayerName = playerInfo.Id;
+        }
+
+        _players[(uint) syntheticPlayer.Id.Value] = syntheticPlayer;
+    }
+
+    private void PopulateKillFeedFromEliminations(FortniteReplay replay)
+    {
+        if (KillFeed.Count > 0 || replay.Eliminations.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var elimination in replay.Eliminations.Distinct())
+        {
+            var eliminated = TryGetPlayerDataFromEventId(elimination.Eliminated);
+            var eliminator = TryGetPlayerDataFromEventId(elimination.Eliminator);
+
+            KillFeed.Add(new KillFeedEntry
+            {
+                PlayerId = eliminated?.Id,
+                PlayerName = eliminated?.PlayerName ?? eliminated?.PlayerId ?? elimination.Eliminated,
+                PlayerIsBot = eliminated?.IsBot ?? elimination.EliminatedInfo.IsBot,
+                FinisherOrDowner = eliminator?.Id,
+                FinisherOrDownerName = eliminator?.PlayerName ?? eliminator?.PlayerId ?? elimination.Eliminator,
+                FinisherOrDownerIsBot = eliminator?.IsBot ?? elimination.EliminatorInfo.IsBot,
+                Distance = (float?) elimination.Distance,
+                DeathLocation = elimination.EliminatedInfo.Location,
+                IsDowned = elimination.Knocked
+            });
+        }
+    }
+
+    private PlayerData? TryGetPlayerDataFromEventId(string? playerId)
+    {
+        if (string.IsNullOrEmpty(playerId))
+        {
+            return null;
+        }
+
+        return _players.Values.FirstOrDefault(player =>
+            player.PlayerId == playerId ||
+            player.EpicId == playerId ||
+            player.BotId == playerId ||
+            player.PlatformUniqueNetId == playerId);
     }
 
     private bool TryGetPlayerDataFromActor(uint guid, [NotNullWhen(returnValue: true)] out PlayerData? playerData)

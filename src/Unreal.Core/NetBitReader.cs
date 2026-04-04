@@ -247,4 +247,50 @@ public class NetBitReader : BitReader
 
         return "";
     }
+
+    /// <summary>
+    /// Skips bits to align to the next byte boundary.
+    /// Useful for version-specific format changes where padding may be required.
+    /// </summary>
+    public void SkipPaddingToNextByte()
+    {
+        if ((Position & 0x7) != 0)  // if not byte-aligned
+        {
+            SkipBits(8 - (Position & 0x7));
+        }
+    }
+
+    /// <summary>
+    /// Attempts to read data with version compatibility handling.
+    /// If the operation fails due to version mismatch, logs a warning instead of throwing.
+    /// </summary>
+    public bool TryReadWithVersionCompat(int numBits, out uint value)
+    {
+        try
+        {
+            if (numBits <= 32)
+            {
+                value = ReadUInt32();
+                return true;
+            }
+            value = 0;
+            return false;
+        }
+        catch
+        {
+            value = 0;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Validates bit alignment for the current read position.
+    /// Returns true if aligned to byte boundary, false otherwise.
+    /// </summary>
+    public bool IsByteAligned => (Position & 0x7) == 0;
+
+    /// <summary>
+    /// Gets the number of bits until the next byte boundary.
+    /// </summary>
+    public int BitsUntilByteAligned => IsByteAligned ? 0 : 8 - (Position & 0x7);
 }

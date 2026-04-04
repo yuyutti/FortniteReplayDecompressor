@@ -41,6 +41,14 @@ public enum EngineNetworkVersionHistory
     PredictionKeyBaseNotReplicated = 34,                // Bump version to stop FPredictionKey::Base from being replicated (it was unused).
     RepMoveOptionalAcceleration = 35,                   // Bump version to support serialization changes to RepMove for optional Acceleration
     CustomExports = 36,                                 // Bump version to support CustomExports (such as NetTokens used for supporting "Dynamic Replication" of GameplayTags -- see FGameplayTag::NetSerialize_Packed)
+    HISTORY_37 = 37,
+    HISTORY_38 = 38,
+    HISTORY_39 = 39,
+    HISTORY_40 = 40,
+    HISTORY_41 = 41,
+    HISTORY_42 = 42,
+    HISTORY_43 = 43,
+    HISTORY_44 = 44,
 
     // -----<new versions can be added above this line>-------------------------------------------------
 

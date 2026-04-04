@@ -6,6 +6,11 @@ namespace FortniteReplayReader.Models;
 
 public class PlayerData
 {
+    public PlayerData()
+    {
+        Cosmetics = new Cosmetics();
+    }
+
     public PlayerData(FortPlayerState playerState)
     {
         Id = playerState.PlayerId is null ? playerState.PlayerID : (int?) playerState.PlayerId;

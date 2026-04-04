@@ -46,7 +46,7 @@ public class BinaryReader : FArchive
 
     public override bool AtEnd() => _position >= _length;
 
-    public override bool CanRead(int count) => _position + count < _length;
+    public override bool CanRead(int count) => _position + count <= _length;
 
     public override T[] ReadArray<T>(Func<T> func1)
     {
@@ -61,6 +61,11 @@ public class BinaryReader : FArchive
 
     public override bool ReadBoolean()
     {
+        if (!CanRead(1))
+        {
+            IsError = true;
+            return false;
+        }
         var result = BitConverter.ToBoolean(Bytes.Slice(_position, 1).Span);
         _position++;
         return result;
@@ -68,6 +73,11 @@ public class BinaryReader : FArchive
 
     public override byte ReadByte()
     {
+        if (!CanRead(1))
+        {
+            IsError = true;
+            return 0;
+        }
         var result = Bytes.Slice(_position, 1).Span;
         _position++;
         return result[0];
@@ -77,6 +87,24 @@ public class BinaryReader : FArchive
 
     public override ReadOnlySpan<byte> ReadBytes(int byteCount)
     {
+        if (byteCount < 0)
+        {
+            IsError = true;
+            return ReadOnlySpan<byte>.Empty;
+        }
+        
+        if (_position + byteCount > _length)
+        {
+            var remaining = _length - _position;
+            if (remaining <= 0)
+            {
+                IsError = true;
+                return ReadOnlySpan<byte>.Empty;
+            }
+            byteCount = remaining;
+            IsError = true;
+        }
+        
         var result = Bytes.Slice(_position, byteCount).Span;
         _position += byteCount;
         return result;
@@ -90,8 +118,19 @@ public class BinaryReader : FArchive
     {
         var length = ReadInt32();
 
+        if (IsError)
+        {
+            return "";
+        }
+
         if (length == 0)
         {
+            return "";
+        }
+
+        if (Math.Abs(length) > _length - _position + 1000)
+        {
+            IsError = true;
             return "";
         }
 
@@ -102,7 +141,12 @@ public class BinaryReader : FArchive
         }
 
         var encoding = isUnicode ? Encoding.Unicode : Encoding.Default;
-        return encoding.GetString(ReadBytes(length))
+        var bytes = ReadBytes(length);
+        if (bytes.IsEmpty)
+        {
+            return "";
+        }
+        return encoding.GetString(bytes)
             .Trim(new[] { ' ', '\0' });
     }
 
@@ -166,6 +210,11 @@ public class BinaryReader : FArchive
 
     public override int ReadInt32()
     {
+        if (!CanRead(4))
+        {
+            IsError = true;
+            return 0;
+        }
         var result = BitConverter.ToInt32(Bytes.Slice(_position, 4).Span);
         _position += 4;
         return result;

@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using Unreal.Core.Contracts;
@@ -311,6 +312,9 @@ public abstract class ReplayReader<T> where T : Replay, new()
     /// </summary>
     public virtual void ReadReplayChunks(FArchive archive)
     {
+        var hasParsedHeader = false;
+        var deferredReplayData = new List<(int Offset, int Size)>();
+
         while (!archive.AtEnd())
         {
             var chunkType = archive.ReadUInt32AsEnum<ReplayChunkType>();
@@ -326,7 +330,14 @@ public abstract class ReplayReader<T> where T : Replay, new()
 
             if (chunkType == ReplayChunkType.ReplayData && _parseMode > ParseMode.EventsOnly)
             {
-                ReadReplayData(archive, chunkSize);
+                if (!hasParsedHeader)
+                {
+                    deferredReplayData.Add((offset, chunkSize));
+                }
+                else
+                {
+                    ReadReplayData(archive, chunkSize);
+                }
             }
 
             else if (chunkType == ReplayChunkType.Checkpoint)
@@ -344,12 +355,22 @@ public abstract class ReplayReader<T> where T : Replay, new()
             else if (chunkType == ReplayChunkType.Header)
             {
                 ReadReplayHeader(archive);
+                hasParsedHeader = true;
             }
 
             if (archive.Position != offset + chunkSize)
             {
                 _logger?.LogDebug("Chunk ({chunkType}) at offset {offset} not fully read...", chunkType, offset);
                 archive.Seek(offset + chunkSize, SeekOrigin.Begin);
+            }
+        }
+
+        if (deferredReplayData.Count > 0)
+        {
+            foreach (var (deferredOffset, deferredSize) in deferredReplayData)
+            {
+                archive.Seek(deferredOffset, SeekOrigin.Begin);
+                ReadReplayData(archive, deferredSize);
             }
         }
     }
@@ -382,7 +403,16 @@ public abstract class ReplayReader<T> where T : Replay, new()
         using var binaryArchive = Decompress(decrypted);
         while (!binaryArchive.AtEnd())
         {
+            var frameStartPosition = binaryArchive.Position;
             ReadDemoFrameIntoPlaybackPackets(binaryArchive);
+
+            if (binaryArchive.Position <= frameStartPosition)
+            {
+                _logger?.LogWarning(
+                    "Stopping replay data parsing because the frame reader made no progress at position {position}.",
+                    frameStartPosition);
+                break;
+            }
         }
         replayDataIndex++;
     }
@@ -601,18 +631,26 @@ public abstract class ReplayReader<T> where T : Replay, new()
         }
         else if (bufferSize > 2048)
         {
-            _logger?.LogWarning("ReadPacket: OutBufferSize > 2048");
+            _logger?.LogWarning("ReadPacket: OutBufferSize > 2048 (size: {bufferSize}). Current position: {position}", bufferSize, archive.Position);
             return PacketState.Error;
         }
         else if (bufferSize < 0)
         {
-            _logger?.LogWarning("ReadPacket: OutBufferSize < 0");
+            _logger?.LogWarning("ReadPacket: OutBufferSize < 0 (size: {bufferSize}). Current position: {position}", bufferSize, archive.Position);
             return PacketState.Error;
         }
 
-        // https://github.com/EpicGames/UnrealEngine/blob/70bc980c6361d9a7d23f6d23ffe322a2d6ef16fb/Engine/Source/Runtime/Engine/Private/DemoNetDriver.cpp#L3338
-        ReceivedRawPacket(archive.ReadBytes(bufferSize));
-        return PacketState.Success;
+        try
+        {
+            // https://github.com/EpicGames/UnrealEngine/blob/70bc980c6361d9a7d23f6d23ffe322a2d6ef16fb/Engine/Source/Runtime/Engine/Private/DemoNetDriver.cpp#L3338
+            ReceivedRawPacket(archive.ReadBytes(bufferSize));
+            return PacketState.Success;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to read packet of size {bufferSize} at position {position}", bufferSize, archive.Position);
+            return PacketState.Error;
+        }
     }
 
     /// <summary>
@@ -794,6 +832,17 @@ public abstract class ReplayReader<T> where T : Replay, new()
     /// </summary>
     public virtual void ReadDemoFrameIntoPlaybackPackets(FArchive archive)
     {
+        // 新形式の検出（v27+では構造が異なる可能性）
+        bool isNewFormat = false;
+        try
+        {
+            if (archive is BinaryReader br)
+            {
+                isNewFormat = br.Position > 0 && archive.NetworkVersion >= NetworkVersionHistory.HISTORY_MULTIPLE_LEVELS;
+            }
+        }
+        catch { /* 新形式判定失敗時は従来形式として処理 */ }
+        
         if (archive.NetworkVersion >= NetworkVersionHistory.HISTORY_MULTIPLE_LEVELS)
         {
             // currentLevelIndex
@@ -801,7 +850,8 @@ public abstract class ReplayReader<T> where T : Replay, new()
         }
 
         var timeSeconds = archive.ReadSingle();
-        _logger?.LogDebug("ReadDemoFrameIntoPlaybackPackets at {}", timeSeconds);
+        _logger?.LogDebug("ReadDemoFrameIntoPlaybackPackets at {} seconds (Position: {}, NetworkVersion: {}, IsNewFormat: {})", 
+            timeSeconds, archive.Position, archive.NetworkVersion, isNewFormat);
 
         if (archive.NetworkVersion >= NetworkVersionHistory.HISTORY_LEVEL_STREAMING_FIXES)
         {
@@ -854,21 +904,44 @@ public abstract class ReplayReader<T> where T : Replay, new()
         }
 
         var @continue = true;
+        int packetCount = 0;
         while (@continue)
         {
-            if (archive.HasLevelStreamingFixes())
+            try
             {
-                // seenLevelIndex
-                archive.ReadIntPacked();
-            }
+                if (archive.HasLevelStreamingFixes())
+                {
+                    // seenLevelIndex
+                    archive.ReadIntPacked();
+                }
 
-            @continue = ReadPacket(archive) switch
+                @continue = ReadPacket(archive) switch
+                {
+                    PacketState.End => false,
+                    PacketState.Error => false,
+                    PacketState.Success => true,
+                    _ => false
+                };
+                
+                if (@continue) packetCount++;
+                
+                // 新形式での無限ループ防止
+                if (packetCount > 100000)
+                {
+                    _logger?.LogWarning("Stopping packet reading: packetCount exceeded (Position: {})", archive.Position);
+                    break;
+                }
+            }
+            catch (ArgumentOutOfRangeException ex)
             {
-                PacketState.End => false,
-                PacketState.Error => false,
-                PacketState.Success => true,
-                _ => false
-            };
+                _logger?.LogError("ArgumentOutOfRange in ReadPacket: {}, Position: {}", ex.Message, archive.Position);
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Error in ReadPacket: {}, Position: {}", ex.Message, archive.Position);
+                break;
+            }
         }
     }
 
@@ -1761,7 +1834,7 @@ public abstract class ReplayReader<T> where T : Replay, new()
             OnExportRead(channelIndex, exportGroup);
         }
 
-        if (Channels[channelIndex].IsIgnoringGroup(group.PathName) && _parseMode != ParseMode.Debug)
+        if (IgnoreGroupOnChannel(channelIndex, exportGroup) && _parseMode != ParseMode.Debug)
         {
             Channels[channelIndex].IgnoreGroup(group.PathName);
         }
@@ -1929,12 +2002,12 @@ public abstract class ReplayReader<T> where T : Replay, new()
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "ReceivedPacket failed, index: {}", packetIndex);
+                _logger?.LogError(ex, "ReceivedPacket failed at packet index: {packetIndex}, bit size: {bitSize}", packetIndex, bitSize);
             }
         }
         else
         {
-            _logger?.LogError("Malformed packet: Received packet with 0's in last byte of packet, index: {}", packetIndex);
+            _logger?.LogError("Malformed packet: Received packet with 0's in last byte of packet at index: {packetIndex}", packetIndex);
             throw new MalformedPacketException("Malformed packet: Received packet with 0's in last byte of packet");
         }
     }

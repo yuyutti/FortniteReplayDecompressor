@@ -13,8 +13,11 @@ public class PlayerElimination : BaseEvent, IEquatable<PlayerElimination>
     public string Time { get; internal set; }
     public bool Knocked { get; internal set; }
     public bool IsSelfElimination => Eliminated == Eliminator;
-    public bool IsValidLocation => EliminatorInfo.Location.Size() != 0;
-    public double? Distance => IsValidLocation ? EliminatorInfo.Location.DistanceTo(EliminatedInfo.Location) : null;
+    public bool IsValidLocation => EliminatorInfo?.Location != null && EliminatorInfo.Location.Size() != 0;
+    public double? Distance =>
+        IsValidLocation && EliminatedInfo?.Location != null
+            ? EliminatorInfo.Location.DistanceTo(EliminatedInfo.Location)
+            : null;
 
     public bool Equals(PlayerElimination other)
     {
